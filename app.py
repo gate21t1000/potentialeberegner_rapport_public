@@ -530,7 +530,7 @@ st.title("🏢 IoT Investeringspotentiale")
 st.caption(f"Rapport genereret: {datetime.now().strftime('%d-%m-%Y %H:%M')} | Filter: {filter_beskrivelse}")
 
 if detalje_mode:
-    st.success(f"🔍 **Detalje-visning** for bygning: `{bygning_id[:8]}...`")
+    st.success(f"🔍 **Detalje-visning** for bygning: `{str(bygning_id)[:8]}...`")
 
 # =============================================================================
 # DETALJE MODE - ENKELT BYGNING
@@ -608,7 +608,7 @@ if detalje_mode and show_sensorer:
                     color_continuous_scale='Oranges'
                 )
                 fig_sensor.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig_sensor, use_container_width=True)
+                st.plotly_chart(fig_sensor, width="stretch")
             
             with col2:
                 st.subheader("Sensor tabel")
@@ -619,7 +619,7 @@ if detalje_mode and show_sensorer:
                         'pris_spænd': 'Pris (min-max)'
                     }),
                     hide_index=True,
-                    use_container_width=True
+                    width="stretch"
                 )
                 
                 # Total
@@ -655,7 +655,7 @@ if detalje_mode and show_use_cases:
                 hover_data=['antal_enheder']
             )
             fig_usecase.update_layout(height=500, yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig_usecase, use_container_width=True)
+            st.plotly_chart(fig_usecase, width="stretch")
             
             # Tabel med detaljer
             with st.expander("📋 Se use case tabel"):
@@ -667,7 +667,7 @@ if detalje_mode and show_use_cases:
                         'antal_sensorer': 'Sensorer'
                     }),
                     hide_index=True,
-                    use_container_width=True
+                    width="stretch"
                 )
         else:
             st.info("Ingen use case data fundet")
@@ -705,7 +705,7 @@ if detalje_mode and show_sensor_usecase_breakdown:
                 aspect='auto'
             )
             fig_heatmap.update_layout(height=600)
-            st.plotly_chart(fig_heatmap, use_container_width=True)
+            st.plotly_chart(fig_heatmap, width="stretch")
             
             # Detalje tabel
             with st.expander("📋 Se komplet breakdown tabel"):
@@ -720,7 +720,7 @@ if detalje_mode and show_sensor_usecase_breakdown:
                         'pris_spænd': 'Pris'
                     }),
                     hide_index=True,
-                    use_container_width=True
+                    width="stretch"
                 )
         else:
             st.info("Ingen breakdown data fundet")
@@ -785,7 +785,7 @@ if not detalje_mode and show_anvendelse:
                     color_continuous_scale='Blues'
                 )
                 fig_bar.update_layout(height=500, yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, width="stretch")
             
             with col2:
                 fig_pie = px.pie(
@@ -796,7 +796,7 @@ if not detalje_mode and show_anvendelse:
                     hole=0.4
                 )
                 fig_pie.update_layout(height=500)
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, width="stretch")
         else:
             st.info("Ingen data fundet for dette filter")
             
@@ -825,7 +825,7 @@ if not detalje_mode and show_sensorer:
                 color_continuous_scale='Oranges'
             )
             fig_sensor.update_layout(height=500, yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig_sensor, use_container_width=True)
+            st.plotly_chart(fig_sensor, width="stretch")
         else:
             st.info("Ingen sensordata fundet")
             
@@ -853,7 +853,7 @@ if not detalje_mode and show_kommuner:
                 color_continuous_scale='Greens'
             )
             fig_kommune.update_layout(height=400)
-            st.plotly_chart(fig_kommune, use_container_width=True)
+            st.plotly_chart(fig_kommune, width="stretch")
         else:
             st.info("Ingen kommunedata fundet")
             
@@ -923,7 +923,7 @@ if show_kort:
                         <tr><td><b>Niveau:</b></td><td>{row['investerings_niveau']}</td></tr>
                     </table>
                     <p style="margin: 10px 0 0 0; font-size: 10px; color: #666;">
-                        Bygning ID: {row['bygning_id'][:8]}...
+                        Bygning ID: {str(row['bygning_id'])[:8]}...
                     </p>
                 </div>
                 """
@@ -940,7 +940,7 @@ if show_kort:
                 ).add_to(m)
             
             # Vis kort
-            st_folium(m, width=None, height=500, use_container_width=True)
+            st_folium(m, height=500, width=None)
             
             st.caption(f"Viser {len(gdf)} bygninger (max {KORT_MAX_PUNKTER})")
         else:
@@ -976,7 +976,7 @@ if not detalje_mode and show_top_bygninger:
                     "investering_max_kr": "Investering (max)"
                 },
                 hide_index=True,
-                use_container_width=True
+                width="stretch"
             )
         else:
             st.info("Ingen bygninger fundet")
@@ -1006,7 +1006,7 @@ if not detalje_mode and show_use_cases:
                 color_discrete_sequence=px.colors.qualitative.Set2
             )
             fig_usecase.update_layout(height=500, yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig_usecase, use_container_width=True)
+            st.plotly_chart(fig_usecase, width="stretch")
         else:
             st.info("Ingen use case data fundet")
             
@@ -1071,7 +1071,7 @@ if show_faciliteter:
                     xaxis_tickangle=-45
                 )
                 
-                st.plotly_chart(fig_facilitet, use_container_width=True)
+                st.plotly_chart(fig_facilitet, width="stretch")
             else:
                 st.info("Ingen facilitetdata fundet")
                 
