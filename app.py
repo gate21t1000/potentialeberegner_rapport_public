@@ -511,11 +511,17 @@ def get_kombo_alternativer(bygning_id):
             kombos = result['kombos'].iloc[0]
             if isinstance(kombos, str):
                 return json.loads(kombos)
-            return kombos
+            if isinstance(kombos, list):
+                return kombos
+            return []
         return []
-    except Exception:
+    except Exception as e:
         # Fallback hvis funktionen ikke findes - beregn i Python
-        return get_kombo_alternativer_fallback(bygning_id)
+        try:
+            return get_kombo_alternativer_fallback(bygning_id)
+        except Exception as e2:
+            # Hvis fallback også fejler, returner tom liste med fejl-info
+            return {'error': f"DB: {e}, Fallback: {e2}"}
 
 @st.cache_data(ttl=300)
 def get_kombo_alternativer_fallback(bygning_id):
@@ -850,7 +856,11 @@ if detalje_mode and show_sensorer:
             try:
                 kombos = get_kombo_alternativer(bygning_id)
                 
-                if kombos and len(kombos) > 0:
+                # Tjek for fejl
+                if isinstance(kombos, dict) and 'error' in kombos:
+                    st.warning(f"Kombo-beregning fejlede: {kombos['error']}")
+                    st.caption("Kør `kombo_sensorer.sql` i databasen for at aktivere.")
+                elif kombos and len(kombos) > 0:
                     # Kombo oversigt som cirkeldiagram (besparelser)
                     kombo_df = pd.DataFrame(kombos)
                     
@@ -893,7 +903,8 @@ if detalje_mode and show_sensorer:
                     st.info("Ingen kombo-alternativer fundet for denne bygning. Sensorerne matcher ikke tilgængelige kombinations-sensorer.")
                     
             except Exception as e:
-                st.info(f"Kombo-beregning ikke tilgængelig. Kør `kombo_sensorer.sql` i databasen for at aktivere.")
+                st.warning(f"Kombo-beregning fejlede: {e}")
+                st.caption("Kør `kombo_sensorer.sql` i databasen for at aktivere.")
                 
         else:
             st.info("Ingen sensordata fundet")
