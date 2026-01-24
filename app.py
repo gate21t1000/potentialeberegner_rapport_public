@@ -909,6 +909,57 @@ if detalje_mode and show_sensorer:
             try:
                 kombos = get_kombo_alternativer(bygning_id)
                 
+                # DEBUG: Vis hvad vi får tilbage
+                with st.expander("🔧 Debug info", expanded=False):
+                    st.write(f"Bygning ID: {bygning_id}")
+                    st.write(f"Kombos type: {type(kombos)}")
+                    st.write(f"Kombos indhold: {kombos}")
+                    
+                    # Test direkte SQL
+                    try:
+                        debug_sql = f"""
+                        SELECT sensor_elem->>'type' AS sensor_type,
+                               SUM((sensor_elem->>'antal')::INTEGER) AS antal
+                        FROM {SCHEMA}.bbr_potentiale bp,
+                             jsonb_array_elements(bp.iot_sensorer) AS sensor_elem
+                        WHERE bp.bygning = '{bygning_id}'
+                        GROUP BY sensor_elem->>'type'
+                        """
+                        debug_df = query_df(debug_sql)
+                        st.write("Sensorer i bygningen:")
+                        st.dataframe(debug_df)
+                        
+                        # Tjek kombo-priser vs enkelt-priser
+                        pris_sql = f"""
+                        SELECT ist.sensor_type, ist.pris_min_kr, ist.pris_max_kr
+                        FROM {SCHEMA}.iot_sensor_types ist
+                        WHERE ist.sensor_type IN ('Temperaturføler', 'Luftfugtighedssensor', 'CO2-måler', 
+                                                   'Bevægelsessensor', 'Tilstedeværelsessensor', 'Støjsensor')
+                        ORDER BY ist.sensor_type
+                        """
+                        pris_df = query_df(pris_sql)
+                        st.write("Sensor priser (fra iot_sensor_types):")
+                        st.dataframe(pris_df)
+                        
+                        # Tjek kombos
+                        kombo_sql = f"""
+                        SELECT k.kombo_navn, k.pris_min_kr, k.pris_max_kr,
+                               STRING_AGG(ist.sensor_type, ' + ') AS komponenter,
+                               SUM(ist.pris_min_kr) AS sum_enkelt_min,
+                               SUM(ist.pris_max_kr) AS sum_enkelt_max
+                        FROM {SCHEMA}.iot_sensor_kombos k
+                        JOIN {SCHEMA}.kombo_komponenter kk ON kk.kombo_id = k.id
+                        JOIN {SCHEMA}.iot_sensor_types ist ON ist.id = kk.sensor_type_id
+                        WHERE k.aktiv = TRUE
+                        GROUP BY k.id, k.kombo_navn, k.pris_min_kr, k.pris_max_kr
+                        """
+                        kombo_debug_df = query_df(kombo_sql)
+                        st.write("Kombo definitioner:")
+                        st.dataframe(kombo_debug_df)
+                        
+                    except Exception as e:
+                        st.write(f"Debug SQL fejl: {e}")
+                
                 # Tjek for fejl
                 if isinstance(kombos, dict) and 'error' in kombos:
                     st.warning(f"Kombo-beregning fejlede: {kombos['error']}")
