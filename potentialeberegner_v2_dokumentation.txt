@@ -1,0 +1,789 @@
+================================================================================
+POTENTIALEBEREGNER v2 - DETALJERET DOKUMENTATION
+================================================================================
+
+Denne dokumentation beskriver tabellernes struktur, deres indbyrdes relationer,
+samt hvordan investeringsbehovet beregnes.
+
+================================================================================
+INDHOLDSFORTEGNELSE
+================================================================================
+
+1. OVERORDNET FORMÅL OG ARKITEKTUR
+2. TABELBESKRIVELSER
+   2.1 Hovedtabel: bbr_potentiale
+   2.2 Støttetabel: use_cases
+   2.3 Støttetabel: iot_sensor_types
+   2.4 Junction-tabel: use_case_sensor_mapping
+   2.5 Junction-tabel: anvendelse_use_case_mapping
+   2.6 Kombo-tabel: iot_sensor_kombos
+   2.7 Junction-tabel: kombo_komponenter
+3. RELATIONER MELLEM TABELLER
+4. BEREGNING AF INVESTERINGSBEHOV
+   4.1 Dataflow
+   4.2 Multiplikator-logik
+   4.3 Beregningseksempel
+5. FILTRERING AF DATA
+6. JSONB-STRUKTUR
+7. FUNKTIONER OG DERES FORMÅL
+8. KOMBO-SENSORER (KOMBINATIONSSENSORER)
+
+
+================================================================================
+1. OVERORDNET FORMÅL OG ARKITEKTUR
+================================================================================
+
+FORMÅL:
+Potentialeberegneren identificerer hvilke IoT use cases der er relevante for
+en given bygningsenhed, og beregner det samlede investeringsbehov i form af:
+- Antal sensorer (multipliceret med antal faciliteter)
+- Prisspænd (minimum og maksimum investering)
+
+ÆNDRING FRA VERSION 1:
+- Version 1 fokuserede på besparingspotentiale (kWh/år, kr/år)
+- Version 2 fokuserer på investeringsbehov (antal sensorer, prisspænd)
+
+ARKITEKTUR:
+Løsningen bruger samme hybride tilgang som v1:
+- Junction-tabeller holder normaliserede relationer (vedligeholdelse)
+- JSONB-kolonner i hovedtabellen fungerer som cache (performance)
+
+
+================================================================================
+2. TABELBESKRIVELSER
+================================================================================
+
+--------------------------------------------------------------------------------
+2.1 HOVEDTABEL: bbr_potentiale
+--------------------------------------------------------------------------------
+
+Formål: Indeholder BBR-enheder med beregnede use cases, sensorer og investering.
+
+NYE/ÆNDREDE KOLONNER I V2:
+
+A) FACILITET-TÆLLINGER (beregnet fra BBR-data)
+   - antal_toiletter      : Antal vandskyllende toiletter (kun relevante typer)
+   - antal_badevaerelser  : Antal badeværelser
+   - antal_koekken        : Antal køkkener (kun relevante typer)
+
+B) INVESTERINGSFELTER (erstatter besparelsesfelter)
+   - antal_use_cases           : Antal identificerede use cases
+   - antal_sensor_typer        : Antal forskellige sensortyper
+   - total_antal_sensorer      : Samlet antal sensorer (inkl. multiplikation)
+   - samlet_investering_min_kr : Nedre prisspænd for samlet investering
+   - samlet_investering_max_kr : Øvre prisspænd for samlet investering
+
+FJERNEDE KOLONNER FRA V1:
+   - samlet_besparingspotentiale_kwh_aar
+   - samlet_besparingspotentiale_kr_aar
+
+
+--------------------------------------------------------------------------------
+2.2 STØTTETABEL: use_cases
+--------------------------------------------------------------------------------
+
+Formål: Definerer alle mulige use cases.
+
+KOLONNER:
+   - id              : Primær nøgle
+   - use_case_navn   : Navn på use casen
+   - beskrivelse     : Uddybende beskrivelse
+   - link            : URL til mere information (fra iotwiki.dk)
+   - link2           : Evt. supplerende URL
+   - kategori        : Kategorisering (varme, el, vand, ventilation, etc.)
+   - created_at      : Oprettelsestidspunkt
+
+FJERNEDE KOLONNER FRA V1:
+   - besparingspotentiale_kwh_aar
+   - besparingspotentiale_kr_aar
+
+Antal records: 33 use cases
+
+
+--------------------------------------------------------------------------------
+2.3 STØTTETABEL: iot_sensor_types
+--------------------------------------------------------------------------------
+
+Formål: Definerer alle sensortyper med prisspænd.
+
+KOLONNER:
+   - id           : Primær nøgle
+   - sensor_type  : Navn på sensortypen
+   - beskrivelse  : Uddybende beskrivelse
+   - pris_min_kr  : Nedre pris (kr) - NY KOLONNE
+   - pris_max_kr  : Øvre pris (kr) - NY KOLONNE
+   - aktiv        : Boolean - om sensoren er aktiv (default TRUE)
+   - created_at   : Oprettelsestidspunkt
+
+ÆNDRING FRA V1:
+   - Erstattet: pris_estimat_kr → pris_min_kr + pris_max_kr
+
+DEAKTIVERING AF SENSORTYPER:
+   Sensortyper kan deaktiveres uden at slettes. Deaktiverede sensorer:
+   - Medtages IKKE i beregninger (iot_sensorer JSONB)
+   - Vises IKKE i dropdowns (Grafana, Streamlit)
+   - Bevares i databasen for historik
+
+   -- Deaktivér sensor
+   UPDATE iot_sensor_types SET aktiv = FALSE WHERE sensor_type = 'Vindmåler';
+   
+   -- Genberegn potentialer efter ændring
+   SELECT update_all_potentialer();
+
+Antal records: 36 sensortyper
+
+
+--------------------------------------------------------------------------------
+2.4 JUNCTION-TABEL: use_case_sensor_mapping
+--------------------------------------------------------------------------------
+
+Formål: Definerer hvilke sensorer der kræves for hver use case, samt hvordan
+        sensorantallet skal beregnes.
+
+KOLONNER:
+   - id                  : Primær nøgle
+   - use_case_id         : Foreign key til use_cases
+   - sensor_type_id      : Foreign key til iot_sensor_types
+   - er_primaer          : Boolean - er sensoren den primære for use casen?
+   - multiplikator_kilde : NY KOLONNE - hvad ganges sensorantallet med?
+
+MULTIPLIKATOR_KILDE VÆRDIER:
+   - 'enhed'           : 1 sensor per enhed (standard)
+   - 'toilet'          : 1 sensor per toilet
+   - 'badevaerelser'   : 1 sensor per badeværelse
+   - 'koekken'         : 1 sensor per køkken
+   - 'areal_per_100m2' : 1 sensor per 100 m² areal
+
+EKSEMPLER PÅ MAPPING:
+
+Use case: "Detektering af løbende toiletter" (id=6)
+┌─────────────────────┬──────────────────────┐
+│ Sensor              │ Multiplikator        │
+├─────────────────────┼──────────────────────┤
+│ Vandflowmåler       │ toilet (primær)      │
+│ Lækagesensor        │ toilet               │
+└─────────────────────┴──────────────────────┘
+→ Hvis enhed har 5 toiletter: 5 vandflowmålere + 5 lækagesensorer
+
+Use case: "Behovsstyret ventilation via CO2-måling" (id=2)
+┌─────────────────────┬──────────────────────┐
+│ Sensor              │ Multiplikator        │
+├─────────────────────┼──────────────────────┤
+│ CO2-måler           │ areal_per_100m2      │
+│ Temperaturføler     │ enhed                │
+│ Luftfugtighedssensor│ enhed                │
+└─────────────────────┴──────────────────────┘
+→ Hvis enhed har 300 m²: 3 CO2-målere + 1 temperaturføler + 1 luftfugtighed
+
+Use case: "Automatisk egenkontrol, frysere og køleskabe" (id=30)
+┌─────────────────────┬──────────────────────┐
+│ Sensor              │ Multiplikator        │
+├─────────────────────┼──────────────────────┤
+│ Temperaturføler     │ koekken (primær)     │
+└─────────────────────┴──────────────────────┘
+→ Hvis daginstitution har køkken: 1 temperaturføler til egenkontrol
+
+
+--------------------------------------------------------------------------------
+2.5 JUNCTION-TABEL: anvendelse_use_case_mapping
+--------------------------------------------------------------------------------
+
+Formål: Definerer hvilke use cases der er relevante for hvilke anvendelsestyper.
+
+ÆNDRING FRA V1:
+   - Bruger nu anvendelse_tekst (den fulde tekst) i stedet for anvendelseskode
+   - Betydeligt udvidet med flere mappings for at koble flest mulige use cases
+
+KOLONNER:
+   - id               : Primær nøgle
+   - anvendelse_tekst : Den fulde BBR-tekstbeskrivelse
+   - use_case_id      : Foreign key til use_cases
+   - relevans_score   : Score 1-10 for relevans
+
+EKSEMPEL - DAGINSTITUTION HAR 18 USE CASES:
+┌────────────────────────────────────────────────┬──────────┐
+│ Use case                                       │ Relevans │
+├────────────────────────────────────────────────┼──────────┤
+│ Behovsstyret ventilation via CO2-måling        │ 9        │
+│ Automatisk egenkontrol, frysere og køleskabe   │ 9        │
+│ Legionella-overvågning via temperaturlogger    │ 9        │
+│ Tælling af brugere i mødelokaler               │ 8        │
+│ Natsænkning af varme baseret på brugsmønstre   │ 8        │
+│ Lækageovervågning af brugsvand                 │ 8        │
+│ Detektering af løbende toiletter               │ 8        │
+│ Automatisk lysstyring via bevægelsessensorer   │ 8        │
+│ Detektering af energiforbrug uden for åbningstid│ 8       │
+│ ... og 9 flere                                 │          │
+└────────────────────────────────────────────────┴──────────┘
+
+
+--------------------------------------------------------------------------------
+2.6 KOMBO-TABEL: iot_sensor_kombos
+--------------------------------------------------------------------------------
+
+Formål: Definerer kombinationssensorer (flere sensortyper i én fysisk enhed).
+
+KOLONNER:
+   - id           : Primær nøgle
+   - kombo_navn   : Navn på kombinationen (f.eks. "Temperatur + Luftfugtighed + CO2")
+   - beskrivelse  : Uddybende beskrivelse
+   - pris_min_kr  : Nedre pris for kombo-sensoren
+   - pris_max_kr  : Øvre pris for kombo-sensoren
+   - aktiv        : Boolean - om komboen er aktiv (default TRUE)
+   - created_at   : Oprettelsestidspunkt
+
+INKLUDEREDE KOMBOS:
+┌─────────────────────────────────────────────────┬─────────────┐
+│ Kombo                                           │ Pris (kr)   │
+├─────────────────────────────────────────────────┼─────────────┤
+│ Temperatur + Luftfugtighed                      │ 400-500     │
+│ Temperatur + PIR                                │ 400-500     │
+│ Temperatur + Luftfugtighed + CO2                │ 1100-1200   │
+│ Temperatur + Luftfugtighed + CO2 + PIR          │ 1200-1300   │
+│ Temperatur + Luftfugtighed + Støjsensor         │ 1200-1300   │
+└─────────────────────────────────────────────────┴─────────────┘
+
+FORMÅL:
+   Kombos bruges til at beregne potentielle besparelser. Hvis en bygning
+   kræver både Temperaturføler, Luftfugtighedssensor og CO2-måler, kan
+   en kombo-sensor ofte købes billigere end tre separate sensorer.
+
+
+--------------------------------------------------------------------------------
+2.7 JUNCTION-TABEL: kombo_komponenter
+--------------------------------------------------------------------------------
+
+Formål: Definerer hvilke enkelt-sensortyper der indgår i hver kombo.
+
+KOLONNER:
+   - id             : Primær nøgle
+   - kombo_id       : Foreign key til iot_sensor_kombos
+   - sensor_type_id : Foreign key til iot_sensor_types
+
+EKSEMPEL - KOMBO "Temperatur + Luftfugtighed + CO2":
+┌─────────────────────────────────────────────────┐
+│ Komponenter                                     │
+├─────────────────────────────────────────────────┤
+│ Temperaturføler (id: 10)                        │
+│ Luftfugtighedssensor (id: 22)                   │
+│ CO2-måler (id: 33)                              │
+└─────────────────────────────────────────────────┘
+
+Enkelt-priser: 150-400 + 200-500 + 350-800 = 700-1700 kr
+Kombo-pris: 1100-1200 kr
+Potentiel besparelse: 0-500 kr per sensor
+
+
+================================================================================
+3. RELATIONER MELLEM TABELLER
+================================================================================
+
+ER-DIAGRAM (tekstform):
+
+┌─────────────────────────┐
+│    bbr_potentiale       │
+│    (hovedtabel)         │
+│                         │
+│ enh020_enhedens_        │
+│ _anvendelse_txt ────────┼──────┐
+│                         │      │
+│ use_cases (JSONB) ◄─────┼──┐   │
+│ iot_sensorer (JSONB) ◄──┼┐ │   │
+│                         ││ │   │
+│ antal_toiletter         ││ │   │
+│ antal_badevaerelser     ││ │   │
+│ antal_koekken           ││ │   │
+│ samlet_investering_*    ││ │   │
+└─────────────────────────┘│ │   │
+                           │ │   │
+                           │ │   ▼
+          ┌────────────────┼─┼───────────────────┐
+          │ anvendelse_use_case_mapping          │
+          │                                      │
+          │ anvendelse_tekst ◄───────────────────┘
+          │ use_case_id ─────┼──┐
+          │ relevans_score   │  │
+          └──────────────────┼──┼────────────────┘
+                             │  │
+                             │  ▼
+                    ┌────────┴───────────────┐
+                    │      use_cases         │
+                    │                        │
+                    │ id ◄───────────────────┼─────────┐
+                    │ use_case_navn          │         │
+                    │ kategori               │         │
+                    │ link                   │         │
+                    └────────────────────────┘         │
+                                                       │
+                    ┌──────────────────────────────────┼─┐
+                    │   use_case_sensor_mapping        │ │
+                    │                                  │ │
+                    │   use_case_id ◄──────────────────┘ │
+                    │   sensor_type_id ───────┐          │
+                    │   multiplikator_kilde   │          │
+                    │   er_primaer            │          │
+                    └─────────────────────────┼──────────┘
+                                              │
+                                              ▼
+                              ┌───────────────────────┐
+                              │   iot_sensor_types    │
+                              │                       │
+                              │   id                  │
+                              │   sensor_type         │
+                              │   pris_min_kr         │
+                              │   pris_max_kr         │
+                              └───────────────────────┘
+
+
+================================================================================
+4. BEREGNING AF INVESTERINGSBEHOV
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 DATAFLOW
+--------------------------------------------------------------------------------
+
+TRIN 1: Hent enhedens data
+        - Anvendelsestekst (enh020_enhedens_anvendelse_txt)
+        - Toiletforhold (enh032_toiletforhold_txt)
+        - Køkkenforhold (enh034_koekkenforhold_txt)
+        - Antal toiletter (enh065_antal_vandskyllede_toiletter)
+        - Antal badeværelser (enh066_antal_badevaerelser)
+        - Samlet areal (enh026_enhedenssamledeareal)
+
+TRIN 2: Valider og beregn facilitet-tællinger
+        - Nulstil antal_toiletter hvis toiletforhold ikke er relevant type
+        - Sæt antal_koekken til 1 hvis køkkenforhold er relevant type
+
+TRIN 3: Find use cases via anvendelse_use_case_mapping
+        - Hent alle use cases der matcher anvendelsesteksten
+        - Returner som JSONB med id, navn, kategori, relevans, link
+
+TRIN 4: Find sensorer via use_case_sensor_mapping
+        - For hver use case: find tilknyttede sensorer
+        - Beregn antal baseret på multiplikator_kilde
+        - Aggreger og fjern dubletter
+
+TRIN 5: Beregn investering
+        - For hver sensortype: antal × pris_min og antal × pris_max
+        - Summér til samlet_investering_min_kr og samlet_investering_max_kr
+
+
+--------------------------------------------------------------------------------
+4.2 MULTIPLIKATOR-LOGIK
+--------------------------------------------------------------------------------
+
+Sensorantallet beregnes med følgende formel:
+
+    antal_sensorer = CASE multiplikator_kilde
+        WHEN 'enhed'           THEN 1
+        WHEN 'toilet'          THEN MAX(antal_toiletter, 1)
+        WHEN 'badevaerelser'   THEN MAX(antal_badevaerelser, 1)
+        WHEN 'koekken'         THEN MAX(antal_koekken, 1)
+        WHEN 'areal_per_100m2' THEN CEIL(areal_m2 / 100)
+    END
+
+Minimum er altid 1 for at undgå 0-sensorer ved manglende data.
+
+
+--------------------------------------------------------------------------------
+4.3 BEREGNINGSEKSEMPEL
+--------------------------------------------------------------------------------
+
+EKSEMPEL: Daginstitution med:
+- Areal: 450 m²
+- Toiletter: 6 stk (vandskyllende i enheden)
+- Badeværelser: 2 stk
+- Køkken: 1 stk (eget køkken med afløb)
+
+IDENTIFICEREDE USE CASES (udvalg):
+┌────────────────────────────────────────┬──────────┐
+│ Use case                               │ Relevans │
+├────────────────────────────────────────┼──────────┤
+│ Behovsstyret ventilation via CO2       │ 9        │
+│ Detektering af løbende toiletter       │ 8        │
+│ Legionella-overvågning                 │ 9        │
+│ Egenkontrol køl/frys                   │ 9        │
+└────────────────────────────────────────┴──────────┘
+
+SENSOR-BEREGNING:
+
+Use case: Behovsstyret ventilation (id=2)
+┌─────────────────────┬────────────┬───────┬─────────────┬─────────────┐
+│ Sensor              │ Multiplik. │ Antal │ Pris min    │ Pris max    │
+├─────────────────────┼────────────┼───────┼─────────────┼─────────────┤
+│ CO2-måler           │ areal/100  │ 5     │ 5×350=1.750 │ 5×800=4.000 │
+│ Temperaturføler     │ enhed      │ 1     │ 1×150=150   │ 1×400=400   │
+│ Luftfugtighedssensor│ enhed      │ 1     │ 1×200=200   │ 1×500=500   │
+└─────────────────────┴────────────┴───────┴─────────────┴─────────────┘
+
+Use case: Detektering af løbende toiletter (id=6)
+┌─────────────────────┬────────────┬───────┬─────────────┬─────────────┐
+│ Sensor              │ Multiplik. │ Antal │ Pris min    │ Pris max    │
+├─────────────────────┼────────────┼───────┼─────────────┼─────────────┤
+│ Vandflowmåler       │ toilet     │ 6     │ 6×500=3.000 │ 6×1200=7.200│
+│ Lækagesensor        │ toilet     │ 6     │ 6×200=1.200 │ 6×500=3.000 │
+└─────────────────────┴────────────┴───────┴─────────────┴─────────────┘
+
+Use case: Legionella-overvågning (id=22)
+┌─────────────────────┬────────────┬───────┬─────────────┬─────────────┐
+│ Sensor              │ Multiplik. │ Antal │ Pris min    │ Pris max    │
+├─────────────────────┼────────────┼───────┼─────────────┼─────────────┤
+│ Temperaturføler     │ badeværelse│ 2     │ 2×150=300   │ 2×400=800   │
+└─────────────────────┴────────────┴───────┴─────────────┴─────────────┘
+
+Use case: Egenkontrol køl/frys (id=30)
+┌─────────────────────┬────────────┬───────┬─────────────┬─────────────┐
+│ Sensor              │ Multiplik. │ Antal │ Pris min    │ Pris max    │
+├─────────────────────┼────────────┼───────┼─────────────┼─────────────┤
+│ Temperaturføler     │ køkken     │ 1     │ 1×150=150   │ 1×400=400   │
+└─────────────────────┴────────────┴───────┴─────────────┴─────────────┘
+
+AGGREGERING (temperaturfølere samles):
+┌─────────────────────┬───────┬─────────────┬─────────────┐
+│ Sensortype          │ Antal │ Total min   │ Total max   │
+├─────────────────────┼───────┼─────────────┼─────────────┤
+│ CO2-måler           │ 5     │ 1.750       │ 4.000       │
+│ Temperaturføler     │ 4     │ 600         │ 1.600       │
+│ Luftfugtighedssensor│ 1     │ 200         │ 500         │
+│ Vandflowmåler       │ 6     │ 3.000       │ 7.200       │
+│ Lækagesensor        │ 6     │ 1.200       │ 3.000       │
+├─────────────────────┼───────┼─────────────┼─────────────┤
+│ TOTAL               │ 22    │ 6.750       │ 16.300      │
+└─────────────────────┴───────┴─────────────┴─────────────┘
+
+RESULTAT FOR ENHEDEN:
+- antal_use_cases: 4 (i dette eksempel)
+- antal_sensor_typer: 5
+- total_antal_sensorer: 22
+- samlet_investering_min_kr: 6.750
+- samlet_investering_max_kr: 16.300
+
+
+================================================================================
+5. FILTRERING AF DATA
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 GYLDIGE ANVENDELSESTEKSTER
+--------------------------------------------------------------------------------
+
+Kun følgende værdier i enh020_enhedens_anvendelse_txt accepteres:
+
+INSTITUTIONER OG UNDERVISNING:
+- Daginstitution
+- (UDFASES) Daginstitution.
+- Grundskole
+- Universitet
+- Anden enhed til undervisning og forskning
+
+KONTOR OG ADMINISTRATION:
+- Enhed til kontor
+- (UDFASES) Offentlig administration.
+
+KULTUR OG FRITID:
+- Bibliotek
+- Forsamlingshus
+- Anden enhed til kulturelle formål
+- Klubhus i forbindelse med fritid- og idræt
+
+IDRÆT:
+- Svømmehal
+- Idrætshal
+- Anden enhed til idrætsformål
+
+SUNDHED:
+- Sundhedscenter, lægehus, fødeklinik mv.
+
+BOLIG:
+- Bolig i etageejendom, flerfamiliehus eller to-familiehus
+- Bolig i døgninstitution
+
+ANDET:
+- Feriecenter, center til campingplads mv.
+
+FACILITET-SPECIFIKKE (bruges til facilitet-tælling):
+- Badeværelse i enheden
+- Adgang til badeværelse
+- Vandskyllende toilet i enheden
+- Vandskyllende toilet uden for enheden
+- Eget køkken med afløb
+- Adgang til fælles køkken
+
+
+--------------------------------------------------------------------------------
+5.2 FILTRERING AF TOILETFORHOLD
+--------------------------------------------------------------------------------
+
+Kun følgende værdier i enh032_toiletforhold_txt tælles som toiletter:
+- "Vandskyllende toilet i enheden"
+- "Vandskyllende toilet uden for enheden"
+
+Andre værdier (f.eks. "Intet toilet", "Anden type") nulstiller antal_toiletter.
+
+
+--------------------------------------------------------------------------------
+5.3 FILTRERING AF KØKKENFORHOLD
+--------------------------------------------------------------------------------
+
+Kun følgende værdier i enh034_koekkenforhold_txt tælles som køkken:
+- "Eget køkken med afløb"
+- "Adgang til fælles køkken"
+
+Disse sætter antal_koekken = 1. Andre værdier giver antal_koekken = 0.
+
+
+================================================================================
+6. JSONB-STRUKTUR
+================================================================================
+
+--------------------------------------------------------------------------------
+6.1 USE_CASES KOLONNE (ændret fra v1)
+--------------------------------------------------------------------------------
+
+Format: JSON-array med objekter
+
+Eksempel:
+[
+    {
+        "id": 2,
+        "navn": "Behovsstyret ventilation via CO2-måling",
+        "kategori": "ventilation",
+        "relevans": 9,
+        "link": "https://iotwiki.dk/t/co2?sort=title"
+    },
+    {
+        "id": 30,
+        "navn": "Automatisk egenkontrol, frysere og køleskabe",
+        "kategori": "køling",
+        "relevans": 9,
+        "link": "https://iotwiki.dk/t/egenkontrol?sort=title"
+    }
+]
+
+ÆNDRINGER FRA V1:
+- Fjernet: besparingspotentiale_kwh
+- Tilføjet: link (URL til mere info)
+
+
+--------------------------------------------------------------------------------
+6.2 IOT_SENSORER KOLONNE (udvidet fra v1)
+--------------------------------------------------------------------------------
+
+Format: JSON-array med objekter
+
+Eksempel:
+[
+    {
+        "id": 33,
+        "type": "CO2-måler",
+        "antal": 5,
+        "pris_min": 350,
+        "pris_max": 800,
+        "pris_total_min": 1750,
+        "pris_total_max": 4000,
+        "er_primaer": true,
+        "for_use_cases": [2, 25]
+    },
+    {
+        "id": 5,
+        "type": "Vandflowmåler",
+        "antal": 6,
+        "pris_min": 500,
+        "pris_max": 1200,
+        "pris_total_min": 3000,
+        "pris_total_max": 7200,
+        "er_primaer": true,
+        "for_use_cases": [6, 31]
+    }
+]
+
+NYE FELTER I V2:
+- antal           : Beregnet antal sensorer (efter multiplikation)
+- pris_min        : Stykpris minimum
+- pris_max        : Stykpris maksimum
+- pris_total_min  : antal × pris_min
+- pris_total_max  : antal × pris_max
+
+
+================================================================================
+7. FUNKTIONER OG DERES FORMÅL
+================================================================================
+
+--------------------------------------------------------------------------------
+7.1 get_use_cases_for_anvendelse(p_anvendelse_txt TEXT)
+--------------------------------------------------------------------------------
+
+Formål: Finder alle relevante use cases for en given anvendelsestekst.
+
+Input:  Anvendelsestekst (f.eks. "Daginstitution")
+Output: JSONB-array med use cases inkl. link
+
+ÆNDRING FRA V1:
+- Bruger nu anvendelse_tekst i stedet for anvendelseskode
+- Inkluderer link-felt i output
+- Fjernet besparingspotentiale fra output
+
+
+--------------------------------------------------------------------------------
+7.2 get_sensors_with_quantities(...) - NY FUNKTION
+--------------------------------------------------------------------------------
+
+Formål: Beregner sensorer med korrekt antal baseret på multiplikator-kilde.
+
+Input:
+- p_use_case_ids     : Array af use case IDs
+- p_antal_toiletter  : Antal toiletter i enheden
+- p_antal_badevaerelser : Antal badeværelser
+- p_antal_koekken    : Antal køkkener
+- p_areal_m2         : Samlet areal i m²
+
+Output: JSONB-array med sensorer inkl. beregnet antal og priser
+
+Logik:
+1. Join use_case_sensor_mapping med iot_sensor_types
+2. Beregn antal baseret på multiplikator_kilde
+3. Aggreger og fjern dubletter (tag max antal ved konflikter)
+4. Beregn totale priser
+
+
+--------------------------------------------------------------------------------
+7.3 update_enhed_potentiale(p_id INTEGER)
+--------------------------------------------------------------------------------
+
+Formål: Opdaterer alle beregnede felter for én enhed.
+
+ÆNDRINGER FRA V1:
+- Beregner nu facilitet-tællinger
+- Validerer toiletforhold og køkkenforhold
+- Kalder get_sensors_with_quantities() i stedet for get_sensors_for_use_cases()
+- Beregner investering i stedet for besparelse
+
+
+--------------------------------------------------------------------------------
+7.4 update_all_potentialer()
+--------------------------------------------------------------------------------
+
+Formål: Batch-opdatering af alle enheder.
+
+Uændret fra v1 - kalder update_enhed_potentiale() for hver enhed.
+
+
+================================================================================
+8. KOMBO-SENSORER (KOMBINATIONSSENSORER)
+================================================================================
+
+Mange IoT-sensorer kommer i dag med flere sensortyper i én fysisk enhed.
+Disse "kombos" kan give besparelser sammenlignet med at købe enkelt-sensorer.
+
+--------------------------------------------------------------------------------
+8.1 FORMÅL
+--------------------------------------------------------------------------------
+
+Kombo-funktionaliteten:
+- Identificerer hvor enkelt-sensorer kan erstattes af kombos
+- Beregner potentielle besparelser
+- Vises som ALTERNATIVER (ikke automatisk erstatning)
+
+Brugeren kan selv vælge om de vil:
+1. Købe enkelt-sensorer (fleksibilitet, kan udskiftes individuelt)
+2. Købe kombos (lavere pris, færre enheder at montere)
+
+
+--------------------------------------------------------------------------------
+8.2 BEREGNINGSLOGIK
+--------------------------------------------------------------------------------
+
+For hver bygning:
+
+1. Hent alle beregnede enkelt-sensorer (fra iot_sensorer JSONB)
+
+2. For hver aktiv kombo:
+   a. Tjek om ALLE komponenters sensortyper findes i bygningen
+   b. Beregn antal kombos = MIN(antal af hver komponent)
+   c. Beregn enkelt-pris = sum af alle komponenters priser
+   d. Beregn kombo-pris = kombo_pris × antal
+   e. Beregn besparelse = enkelt-pris - kombo-pris
+
+3. Vis kun kombos hvor besparelse > 0
+
+
+--------------------------------------------------------------------------------
+8.3 EKSEMPEL
+--------------------------------------------------------------------------------
+
+Bygning med:
+- 10 stk Temperaturføler (150-400 kr) = 1.500-4.000 kr
+- 10 stk Luftfugtighedssensor (200-500 kr) = 2.000-5.000 kr
+- 10 stk CO2-måler (350-800 kr) = 3.500-8.000 kr
+
+Total enkelt-sensorer: 7.000-17.000 kr
+
+Kombo-alternativ: "Temperatur + Luftfugtighed + CO2"
+- 10 stk á 1.100-1.200 kr = 11.000-12.000 kr
+
+Potentiel besparelse: 0-5.000 kr (ved max enkelt-pris vs min kombo-pris)
+
+
+--------------------------------------------------------------------------------
+8.4 FUNKTION: get_kombo_alternativer()
+--------------------------------------------------------------------------------
+
+   SELECT get_kombo_alternativer('BYGNING-UUID'::UUID);
+
+Returnerer JSONB array med:
+   - kombo_navn: Navnet på komboen
+   - erstatter: Array af sensortyper der erstattes
+   - antal: Antal kombos der kan bruges
+   - kombo_pris_min/max: Total pris for kombos
+   - enkelt_pris_min/max: Total pris for enkelt-sensorer
+   - besparelse_min/max: Potentiel besparelse
+
+
+--------------------------------------------------------------------------------
+8.5 ADMINISTRATION
+--------------------------------------------------------------------------------
+
+TILFØJ NY KOMBO:
+   INSERT INTO iot_sensor_kombos (kombo_navn, pris_min_kr, pris_max_kr) 
+   VALUES ('Temperatur + Fugt + Lys', 600, 800);
+   
+   INSERT INTO kombo_komponenter (kombo_id, sensor_type_id) VALUES
+   (CURRVAL('iot_sensor_kombos_id_seq'), 10),  -- Temperaturføler
+   (CURRVAL('iot_sensor_kombos_id_seq'), 22),  -- Luftfugtighedssensor
+   (CURRVAL('iot_sensor_kombos_id_seq'), 21);  -- Lysstyrkemåler
+
+DEAKTIVER KOMBO:
+   UPDATE iot_sensor_kombos SET aktiv = FALSE WHERE kombo_navn = '...';
+
+SE ALLE KOMBOS:
+   SELECT * FROM v_kombo_oversigt;
+
+
+================================================================================
+SLUTNOTER
+================================================================================
+
+Ved tilpasning af systemet:
+
+1. OPDATER SENSORPRISER
+   Priserne er placeholder-værdier. Opdater med reelle priser:
+   UPDATE iot_sensor_types SET pris_min_kr = X, pris_max_kr = Y WHERE ...
+
+2. UDVID USE CASE MAPPINGS
+   Tilføj flere mappings for at koble flere use cases på anvendelser:
+   INSERT INTO anvendelse_use_case_mapping (anvendelse_tekst, use_case_id, ...)
+
+3. JUSTER MULTIPLIKATORER
+   Ændr multiplikator_kilde i use_case_sensor_mapping efter behov
+
+4. TILFØJ KOMBO-SENSORER
+   Tilføj nye kombinationssensorer efterhånden som de bliver tilgængelige:
+   INSERT INTO iot_sensor_kombos (kombo_navn, pris_min_kr, pris_max_kr) VALUES ...
+
+5. GENBEREGN EFTER ÆNDRINGER
+   Kør altid: SELECT update_all_potentialer();
+
+================================================================================
+DOKUMENTATION AFSLUTTET - VERSION 2.1 (med kombo-sensorer)
+================================================================================
