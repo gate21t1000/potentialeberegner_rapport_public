@@ -638,8 +638,8 @@ def get_kombo_alternativer_fallback(bygning_id):
         kombo_pris_per_stk_min = float(kombo['pris_min_kr'])
         kombo_pris_per_stk_max = float(kombo['pris_max_kr'])
         
-        # Kun vis hvis der er besparelse (enkelt > kombo)
-        if enkelt_pris_per_stk_min > kombo_pris_per_stk_max:
+        # Vis hvis der er POTENTIEL besparelse (enkelt_max > kombo_min)
+        if enkelt_pris_per_stk_max > kombo_pris_per_stk_min:
             alternativer.append({
                 'kombo_navn': kombo['kombo_navn'],
                 'erstatter': matched_komponenter,
