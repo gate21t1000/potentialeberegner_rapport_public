@@ -756,12 +756,25 @@ if detalje_mode and show_statistik:
         if len(bygning_info) > 0:
             info = bygning_info.iloc[0]
             
-            # Adresse og type
-            st.subheader(f"📍 {info['adresse'] or 'Ukendt adresse'}")
-            st.write(f"**Anvendelse:** {info['anvendelsestyper']}")
-            st.write(f"**Kommune:** {info['kommunekode']}")
+            # Adresse og type i markant container
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%); 
+                        padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                <h2 style="color: white; margin: 0;">📍 {info['adresse'] or 'Ukendt adresse'}</h2>
+                <p style="color: #a8d4ff; margin: 5px 0 0 0; font-size: 1.1em;">
+                    {info['anvendelsestyper']} | Kommune: {info['kommunekode']}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
             
-            # KPI'er
+            # Investering i fremhævet box
+            st.markdown("""
+            <div style="background: #f0f7ff; padding: 15px; border-radius: 8px; 
+                        border-left: 4px solid #1e3a5f; margin-bottom: 15px;">
+                <p style="margin: 0; color: #1e3a5f; font-weight: bold;">💰 Samlet investeringsbehov</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Enheder", f"{info['antal_enheder']:,.0f}")
@@ -773,6 +786,13 @@ if detalje_mode and show_statistik:
                 st.metric("Investering (max)", f"{info['investering_max_kr']:,.0f} kr")
             
             # Faciliteter
+            st.markdown("""
+            <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; 
+                        border-left: 4px solid #666; margin: 15px 0;">
+                <p style="margin: 0; color: #333; font-weight: bold;">🏗️ Faciliteter i bygningen</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
             col5, col6, col7, col8 = st.columns(4)
             with col5:
                 st.metric("Toiletter", f"{info['total_toiletter']:,.0f}")
@@ -840,7 +860,7 @@ if detalje_mode and show_sensorer:
                     hovertemplate='<b>%{label}</b><br>Antal: %{value}<br>Use cases: %{customdata}<extra></extra>',
                     customdata=sensor_df['use_cases'].fillna('Ingen')
                 )
-                fig_pie.update_layout(height=400, showlegend=False)
+                fig_pie.update_layout(height=500, showlegend=False)
                 st.plotly_chart(fig_pie, width="stretch")
             
             with col2:
@@ -854,7 +874,7 @@ if detalje_mode and show_sensorer:
                     }),
                     hide_index=True,
                     width="stretch",
-                    height=350
+                    height=450
                 )
             
             # Totaler
@@ -879,6 +899,14 @@ if detalje_mode and show_sensorer:
                     st.warning(f"Kombo-beregning fejlede: {kombos['error']}")
                     st.caption("Kør `kombo_sensorer.sql` i databasen for at aktivere.")
                 elif kombos and len(kombos) > 0:
+                    # Forklaring af tabellen
+                    st.info("""
+                    **Sådan læses tabellen:**
+                    - **Separate sensorer**: Hvad det ville koste at købe sensorerne enkeltvis
+                    - **Kombo-pris**: Prisen for én kombinationssensor der dækker alle funktioner
+                    - **Besparelse**: Forskellen mellem at købe enkelt-sensorer vs. en kombo-sensor
+                    """)
+                    
                     # Kombo oversigt som cirkeldiagram (besparelser)
                     kombo_df = pd.DataFrame(kombos)
                     
@@ -899,23 +927,36 @@ if detalje_mode and show_sensorer:
                             textinfo='value+label',
                             hovertemplate='<b>%{label}</b><br>Besparelse: %{value:,.0f} kr<extra></extra>'
                         )
-                        fig_kombo.update_layout(height=350, showlegend=False)
+                        fig_kombo.update_layout(height=500, showlegend=False)
                         st.plotly_chart(fig_kombo, width="stretch")
                     
                     with col_k2:
-                        # Kombo tabel
+                        # Kombo tabel med bedre kolonnenavne
                         kombo_display = kombo_df[['kombo_navn', 'antal', 'enkelt_pris_max', 'kombo_pris_max', 'besparelse_max']].copy()
-                        kombo_display.columns = ['Kombo', 'Antal', 'Enkelt-pris', 'Kombo-pris', 'Besparelse']
-                        kombo_display['Enkelt-pris'] = kombo_display['Enkelt-pris'].apply(lambda x: f"{x:,.0f} kr")
+                        kombo_display.columns = ['Kombo', 'Antal', 'Separate sensorer', 'Kombo-pris', 'Besparelse']
+                        kombo_display['Separate sensorer'] = kombo_display['Separate sensorer'].apply(lambda x: f"{x:,.0f} kr")
                         kombo_display['Kombo-pris'] = kombo_display['Kombo-pris'].apply(lambda x: f"{x:,.0f} kr")
                         kombo_display['Besparelse'] = kombo_display['Besparelse'].apply(lambda x: f"{x:,.0f} kr")
                         
-                        st.dataframe(kombo_display, hide_index=True, width="stretch", height=300)
+                        st.dataframe(kombo_display, hide_index=True, width="stretch", height=400)
                     
                     # Total besparelse
                     total_besparelse = sum(k['besparelse_max'] for k in kombos)
                     st.success(f"💰 **Samlet potentiel besparelse:** {total_besparelse:,.0f} kr (ved brug af alle kombos)")
-                    st.warning("⚠️ Besparelser kan ikke nødvendigvis summeres, da samme sensor kan indgå i flere kombos.")
+                    
+                    # Bedre forklaring af advarsel
+                    with st.expander("⚠️ Vigtigt om besparelsesberegningen", expanded=False):
+                        st.markdown("""
+                        **Hvorfor kan besparelserne ikke bare lægges sammen?**
+                        
+                        Flere kombos kan indeholde de samme sensortyper. For eksempel:
+                        - "Temperatur + Luftfugtighed" indeholder temperaturføler
+                        - "Temperatur + CO2" indeholder også temperaturføler
+                        
+                        Hvis du vælger begge kombos, får du **to** temperaturfølere – men du har måske kun brug for **én**.
+                        
+                        **Anbefaling:** Vælg den kombo der bedst matcher dit behov, eller kontakt en rådgiver for at finde den optimale løsning.
+                        """)
                     
                 else:
                     st.info("Ingen kombo-alternativer fundet for denne bygning. Sensorerne matcher ikke tilgængelige kombinations-sensorer.")
