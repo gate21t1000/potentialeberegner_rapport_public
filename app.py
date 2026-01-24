@@ -893,7 +893,7 @@ if detalje_mode and show_sensorer:
                     st.info("Ingen kombo-alternativer fundet for denne bygning. Sensorerne matcher ikke tilgængelige kombinations-sensorer.")
                     
             except Exception as e:
-                st.info(f"Kombo-beregning ikke tilgængelig. Kør `kombo_sensorer.sql` og `patch_kombo_pir.sql` for at aktivere.")
+                st.info(f"Kombo-beregning ikke tilgængelig. Kør `kombo_sensorer.sql` i databasen for at aktivere.")
                 
         else:
             st.info("Ingen sensordata fundet")
