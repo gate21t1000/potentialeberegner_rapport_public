@@ -160,6 +160,20 @@ def get_filter_options():
     return kommuner['kommunekode'].tolist()
 
 @st.cache_data(ttl=300)
+def get_adresse_options():
+    """Hent unikke adresser til dropdown (begrænset til unikke bygnings-adresser)"""
+    adresser = query_df(f"""
+        SELECT DISTINCT ON (bygning)
+            adressebetegnelse AS adresse
+        FROM {SCHEMA}.bbr_potentiale 
+        WHERE adressebetegnelse IS NOT NULL
+          AND bygning IS NOT NULL
+        ORDER BY bygning, adressebetegnelse
+        LIMIT 5000
+    """)
+    return sorted(adresser['adresse'].dropna().tolist())
+
+@st.cache_data(ttl=300)
 def get_statistik(filter_clause):
     """Hent overordnet statistik"""
     sql = f"""
@@ -449,6 +463,44 @@ def get_sensor_summary(bygning_id):
     return query_df(sql)
 
 @st.cache_data(ttl=300)
+def get_sensor_with_usecases(bygning_id):
+    """Hent sensorer med tilhørende use cases for en bygning"""
+    sql = f"""
+    WITH sensor_usecase_data AS (
+        SELECT 
+            sensor_elem->>'type' AS sensor_type,
+            (sensor_elem->>'antal')::INTEGER AS antal,
+            (sensor_elem->>'pris_total_min')::NUMERIC AS pris_min,
+            (sensor_elem->>'pris_total_max')::NUMERIC AS pris_max,
+            sensor_elem->'for_use_cases' AS use_case_ids
+        FROM {SCHEMA}.bbr_potentiale bp,
+             jsonb_array_elements(bp.iot_sensorer) AS sensor_elem
+        WHERE bp.bygning = '{bygning_id}'
+    ),
+    sensor_with_uc_names AS (
+        SELECT 
+            s.sensor_type,
+            s.antal,
+            s.pris_min,
+            s.pris_max,
+            uc.use_case_navn
+        FROM sensor_usecase_data s,
+             jsonb_array_elements_text(s.use_case_ids) AS uc_id
+        LEFT JOIN {SCHEMA}.use_cases uc ON uc.id = uc_id::INTEGER
+    )
+    SELECT 
+        sensor_type,
+        SUM(antal) AS antal,
+        SUM(pris_min) AS pris_min,
+        SUM(pris_max) AS pris_max,
+        STRING_AGG(DISTINCT use_case_navn, ', ' ORDER BY use_case_navn) AS use_cases
+    FROM sensor_with_uc_names
+    GROUP BY sensor_type
+    ORDER BY antal DESC
+    """
+    return query_df(sql)
+
+@st.cache_data(ttl=300)
 def get_kombo_alternativer(bygning_id):
     """Hent kombo-alternativer for en bygning via database-funktion"""
     try:
@@ -492,8 +544,22 @@ def get_kombo_alternativer_fallback(bygning_id):
     if len(kombo_df) == 0:
         return []
     
-    # Byg sensor lookup
+    # Byg sensor lookup med aliaser for PIR/Bevægelsessensor
     sensor_dict = {row['sensor_type']: row for _, row in sensor_df.iterrows()}
+    
+    # Alias: Bevægelsessensor og Tilstedeværelsessensor er ens (PIR)
+    pir_aliases = ['Bevægelsessensor', 'Tilstedeværelsessensor']
+    pir_sensor = None
+    for alias in pir_aliases:
+        if alias in sensor_dict:
+            pir_sensor = sensor_dict[alias]
+            break
+    
+    # Tilføj aliaser til sensor_dict
+    if pir_sensor:
+        for alias in pir_aliases:
+            if alias not in sensor_dict:
+                sensor_dict[alias] = pir_sensor
     
     alternativer = []
     for _, kombo in kombo_df.iterrows():
@@ -501,18 +567,30 @@ def get_kombo_alternativer_fallback(bygning_id):
         if not komponenter:
             continue
         
-        # Tjek om alle komponenter findes
-        if not all(k in sensor_dict for k in komponenter):
+        # Tjek om alle komponenter findes (med alias-support)
+        matched_komponenter = []
+        all_found = True
+        for k in komponenter:
+            if k in sensor_dict:
+                matched_komponenter.append(k)
+            elif k in pir_aliases and pir_sensor:
+                # Brug alias
+                matched_komponenter.append(k)
+            else:
+                all_found = False
+                break
+        
+        if not all_found:
             continue
         
         # Beregn antal kombos = min antal af komponenter
-        antal = min(int(sensor_dict[k]['antal']) for k in komponenter)
+        antal = min(int(sensor_dict[k]['antal']) for k in matched_komponenter)
         if antal <= 0:
             continue
         
         # Beregn enkelt-priser
-        enkelt_pris_min = sum(float(sensor_dict[k]['pris_min']) for k in komponenter)
-        enkelt_pris_max = sum(float(sensor_dict[k]['pris_max']) for k in komponenter)
+        enkelt_pris_min = sum(float(sensor_dict[k]['pris_min']) for k in matched_komponenter)
+        enkelt_pris_max = sum(float(sensor_dict[k]['pris_max']) for k in matched_komponenter)
         
         # Beregn kombo-priser
         kombo_pris_min = float(kombo['pris_min_kr']) * antal
@@ -520,9 +598,11 @@ def get_kombo_alternativer_fallback(bygning_id):
         
         # Kun vis hvis der er besparelse
         if enkelt_pris_min > kombo_pris_max:
+            # Find de faktiske sensornavne fra bygningen (ikke kombo-definitionens navne)
+            faktiske_sensorer = [sensor_dict[k]['sensor_type'] for k in matched_komponenter]
             alternativer.append({
                 'kombo_navn': kombo['kombo_navn'],
-                'erstatter': list(komponenter),
+                'erstatter': faktiske_sensorer,
                 'antal': antal,
                 'kombo_pris_min': kombo_pris_min,
                 'kombo_pris_max': kombo_pris_max,
@@ -558,7 +638,16 @@ if filter_type == "Kommune":
     except Exception as e:
         st.sidebar.error(f"Kunne ikke hente kommuner: {e}")
 elif filter_type == "Adresse":
-    filter_value = st.sidebar.text_input("Søg adresse", placeholder="f.eks. Vestergade")
+    try:
+        adresser = get_adresse_options()
+        filter_value = st.sidebar.selectbox(
+            "Vælg adresse", 
+            [""] + adresser,
+            help="Vælg en adresse fra listen"
+        )
+    except Exception as e:
+        st.sidebar.error(f"Kunne ikke hente adresser: {e}")
+        filter_value = st.sidebar.text_input("Søg adresse", placeholder="f.eks. Vestergade")
 elif filter_type == "Bygning ID":
     filter_value = st.sidebar.text_input("Bygning ID", placeholder="UUID")
 
@@ -592,14 +681,13 @@ if detalje_mode:
     st.sidebar.info("📌 Enkelt bygning valgt - visse sektioner skjult")
     show_statistik = st.sidebar.checkbox("Bygningsoversigt", value=True)
     show_anvendelse = False  # Irrelevant for enkelt bygning
-    show_sensorer = st.sidebar.checkbox("Sensoroversigt (detaljeret)", value=True)
+    show_sensorer = st.sidebar.checkbox("Sensoroversigt (inkl. kombos)", value=True)
     show_kommuner = False  # Irrelevant for enkelt bygning
     show_kort = st.sidebar.checkbox("Kort", value=True)
     show_top_bygninger = False  # Irrelevant for enkelt bygning
     show_use_cases = st.sidebar.checkbox("Use cases (detaljeret)", value=True)
     show_faciliteter = st.sidebar.checkbox("Faciliteter", value=True)
     show_sensor_usecase_breakdown = st.sidebar.checkbox("Sensor/Use case breakdown", value=True)
-    show_kombo_alternativer = st.sidebar.checkbox("Kombo-alternativer", value=True)
 else:
     show_statistik = st.sidebar.checkbox("Overordnet statistik", value=True)
     show_anvendelse = st.sidebar.checkbox("Anvendelsestyper", value=True)
@@ -610,7 +698,6 @@ else:
     show_use_cases = st.sidebar.checkbox("Use cases", value=True)
     show_faciliteter = st.sidebar.checkbox("Faciliteter", value=True)
     show_sensor_usecase_breakdown = False
-    show_kombo_alternativer = False
 
 # =============================================================================
 # MAIN CONTENT
@@ -679,54 +766,135 @@ if detalje_mode and show_statistik:
         st.error(f"Kunne ikke hente bygningsinfo: {e}")
 
 # -----------------------------------------------------------------------------
-# DETALJE MODE: SENSOR OVERSIGT
+# DETALJE MODE: SENSOR OVERSIGT (med kombo-alternativer integreret)
 # -----------------------------------------------------------------------------
 
 if detalje_mode and show_sensorer:
-    st.header("📡 Sensoroversigt (detaljeret)")
-    st.caption("Viser antal og pris for hver sensortype der kræves til bygningens use cases.")
+    st.header("📡 Sensoroversigt")
+    st.caption("Potentielle sensortyper til bygningens use cases. Cirkeldiagram viser fordeling, kombos viser besparelsesmuligheder.")
     
     try:
-        sensor_df = get_sensor_summary(bygning_id)
+        # Hent sensorer med use cases
+        sensor_df = get_sensor_with_usecases(bygning_id)
         
         if len(sensor_df) > 0:
-            # Tilføj formaterede kolonner
+            # Opret sensor label med use case i parentes (forkortet)
+            def format_sensor_label(row):
+                uc = row['use_cases'] if pd.notna(row['use_cases']) else ''
+                # Forkort use case navne
+                if uc:
+                    uc_list = uc.split(', ')
+                    if len(uc_list) > 2:
+                        uc_short = ', '.join(uc_list[:2]) + f' +{len(uc_list)-2}'
+                    else:
+                        uc_short = uc
+                    return f"{row['sensor_type']} ({uc_short})"
+                return row['sensor_type']
+            
+            sensor_df['sensor_label'] = sensor_df.apply(format_sensor_label, axis=1)
             sensor_df['pris_spænd'] = sensor_df.apply(
                 lambda r: f"{r['pris_min']:,.0f} - {r['pris_max']:,.0f} kr", axis=1
             )
             
-            col1, col2 = st.columns([2, 1])
+            # Layout: Cirkeldiagram + Tabel side om side
+            col1, col2 = st.columns([1, 1])
             
             with col1:
-                fig_sensor = px.bar(
+                st.subheader("Antal potentielle sensortyper")
+                # Cirkeldiagram
+                fig_pie = px.pie(
                     sensor_df,
-                    x='antal',
-                    y='sensor_type',
-                    orientation='h',
-                    title='Antal sensorer per type',
-                    labels={'antal': 'Antal', 'sensor_type': 'Sensortype'},
-                    color='pris_max',
-                    color_continuous_scale='Oranges'
+                    values='antal',
+                    names='sensor_type',
+                    title='Fordeling af sensortyper',
+                    hole=0.4,
+                    color_discrete_sequence=px.colors.qualitative.Set3
                 )
-                fig_sensor.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig_sensor, width="stretch")
+                fig_pie.update_traces(
+                    textposition='inside',
+                    textinfo='value+label',
+                    hovertemplate='<b>%{label}</b><br>Antal: %{value}<br>Use cases: %{customdata}<extra></extra>',
+                    customdata=sensor_df['use_cases'].fillna('Ingen')
+                )
+                fig_pie.update_layout(height=400, showlegend=False)
+                st.plotly_chart(fig_pie, width="stretch")
             
             with col2:
-                st.subheader("Sensor tabel")
+                st.subheader("Sensortabel")
                 st.dataframe(
-                    sensor_df[['sensor_type', 'antal', 'pris_spænd']].rename(columns={
+                    sensor_df[['sensor_type', 'antal', 'pris_spænd', 'use_cases']].rename(columns={
                         'sensor_type': 'Sensortype',
                         'antal': 'Antal',
-                        'pris_spænd': 'Pris (min-max)'
+                        'pris_spænd': 'Pris (min-max)',
+                        'use_cases': 'Use cases'
                     }),
                     hide_index=True,
-                    width="stretch"
+                    width="stretch",
+                    height=350
                 )
-                
-                # Total
+            
+            # Totaler
+            col_t1, col_t2, col_t3 = st.columns(3)
+            with col_t1:
+                st.metric("Total sensortyper", f"{len(sensor_df)}")
+            with col_t2:
                 st.metric("Total sensorer", f"{sensor_df['antal'].sum():,.0f}")
-                st.metric("Total investering", 
-                         f"{sensor_df['pris_min'].sum():,.0f} - {sensor_df['pris_max'].sum():,.0f} kr")
+            with col_t3:
+                st.metric("Total investering", f"{sensor_df['pris_min'].sum():,.0f} - {sensor_df['pris_max'].sum():,.0f} kr")
+            
+            # --- KOMBO-ALTERNATIVER INTEGRERET ---
+            st.divider()
+            st.subheader("🔄 Kombo-alternativer")
+            st.caption("Kombinations-sensorer der kan erstatte flere enkelt-sensorer med potentielle besparelser.")
+            
+            try:
+                kombos = get_kombo_alternativer(bygning_id)
+                
+                if kombos and len(kombos) > 0:
+                    # Kombo oversigt som cirkeldiagram (besparelser)
+                    kombo_df = pd.DataFrame(kombos)
+                    
+                    col_k1, col_k2 = st.columns([1, 1])
+                    
+                    with col_k1:
+                        # Cirkeldiagram over besparelser
+                        fig_kombo = px.pie(
+                            kombo_df,
+                            values='besparelse_max',
+                            names='kombo_navn',
+                            title='Potentiel besparelse per kombo',
+                            hole=0.4,
+                            color_discrete_sequence=px.colors.qualitative.Pastel
+                        )
+                        fig_kombo.update_traces(
+                            textposition='inside',
+                            textinfo='value+label',
+                            hovertemplate='<b>%{label}</b><br>Besparelse: %{value:,.0f} kr<extra></extra>'
+                        )
+                        fig_kombo.update_layout(height=350, showlegend=False)
+                        st.plotly_chart(fig_kombo, width="stretch")
+                    
+                    with col_k2:
+                        # Kombo tabel
+                        kombo_display = kombo_df[['kombo_navn', 'antal', 'enkelt_pris_max', 'kombo_pris_max', 'besparelse_max']].copy()
+                        kombo_display.columns = ['Kombo', 'Antal', 'Enkelt-pris', 'Kombo-pris', 'Besparelse']
+                        kombo_display['Enkelt-pris'] = kombo_display['Enkelt-pris'].apply(lambda x: f"{x:,.0f} kr")
+                        kombo_display['Kombo-pris'] = kombo_display['Kombo-pris'].apply(lambda x: f"{x:,.0f} kr")
+                        kombo_display['Besparelse'] = kombo_display['Besparelse'].apply(lambda x: f"{x:,.0f} kr")
+                        
+                        st.dataframe(kombo_display, hide_index=True, width="stretch", height=300)
+                    
+                    # Total besparelse
+                    total_besparelse = sum(k['besparelse_max'] for k in kombos)
+                    st.success(f"💰 **Samlet potentiel besparelse:** {total_besparelse:,.0f} kr (ved brug af alle kombos)")
+                    st.warning("⚠️ Besparelser kan ikke nødvendigvis summeres, da samme sensor kan indgå i flere kombos.")
+                    
+                else:
+                    st.info("Ingen kombo-alternativer fundet for denne bygning. Sensorerne matcher ikke tilgængelige kombinations-sensorer.")
+                    
+            except Exception as e:
+                st.info(f"Kombo-beregning ikke tilgængelig. Kør `kombo_sensorer.sql` og `patch_kombo_pir.sql` for at aktivere.")
+                
         else:
             st.info("Ingen sensordata fundet")
             
@@ -830,56 +998,6 @@ if detalje_mode and show_sensor_usecase_breakdown:
             
     except Exception as e:
         st.error(f"Kunne ikke hente breakdown: {e}")
-
-# -----------------------------------------------------------------------------
-# DETALJE MODE: KOMBO-ALTERNATIVER
-# -----------------------------------------------------------------------------
-
-if detalje_mode and show_kombo_alternativer:
-    st.header("🔄 Kombo-alternativer")
-    st.caption("Kombinations-sensorer der kan erstatte flere enkelt-sensorer og potentielt give besparelser.")
-    
-    try:
-        kombos = get_kombo_alternativer(bygning_id)
-        
-        if kombos and len(kombos) > 0:
-            st.success(f"💡 Fundet **{len(kombos)} kombo-muligheder** med potentielle besparelser!")
-            
-            for i, kombo in enumerate(kombos):
-                with st.expander(f"**{kombo['kombo_navn']}** - Besparelse: {kombo['besparelse_min']:,.0f} - {kombo['besparelse_max']:,.0f} kr", expanded=(i==0)):
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.markdown("**Erstatter disse enkelt-sensorer:**")
-                        for sensor in kombo['erstatter']:
-                            st.write(f"• {sensor}")
-                        st.metric("Antal kombos", f"{kombo['antal']:,.0f}")
-                    
-                    with col2:
-                        st.markdown("**Prissammenligning:**")
-                        
-                        # Enkelt-sensorer pris
-                        st.write(f"Enkelt-sensorer: **{kombo['enkelt_pris_min']:,.0f} - {kombo['enkelt_pris_max']:,.0f} kr**")
-                        
-                        # Kombo pris
-                        st.write(f"Kombo-pris: **{kombo['kombo_pris_min']:,.0f} - {kombo['kombo_pris_max']:,.0f} kr**")
-                        
-                        # Besparelse
-                        st.success(f"💰 Besparelse: **{kombo['besparelse_min']:,.0f} - {kombo['besparelse_max']:,.0f} kr**")
-            
-            # Opsummering
-            st.divider()
-            total_besparelse_min = sum(k['besparelse_min'] for k in kombos)
-            total_besparelse_max = sum(k['besparelse_max'] for k in kombos)
-            st.info(f"📊 **Samlet potentiel besparelse ved brug af alle kombos:** {total_besparelse_min:,.0f} - {total_besparelse_max:,.0f} kr")
-            
-            st.warning("⚠️ **Bemærk:** Besparelser kan ikke nødvendigvis summeres, da samme sensor kan indgå i flere kombos.")
-        else:
-            st.info("Ingen kombo-alternativer fundet for denne bygning. Det kan skyldes at de nødvendige sensortyper ikke alle er til stede, eller at der ikke er nogen besparelse ved at bruge kombos.")
-            
-    except Exception as e:
-        st.warning(f"Kombo-beregning ikke tilgængelig: {e}")
-        st.caption("Kør `kombo_sensorer.sql` for at aktivere denne funktion.")
 
 # =============================================================================
 # OVERBLIK MODE - ALLE/KOMMUNE FILTER
@@ -1023,7 +1141,7 @@ if not detalje_mode and show_kommuner:
 
 if show_kort:
     st.header("🗺️ Kort over bygninger")
-    st.caption("Geografisk visning af bygninger. Klik på en markør for at se detaljer.")
+    st.caption("Geografisk visning af bygninger. Markørernes størrelse viser investeringspotentialet – større markør = højere investering. Klik for detaljer.")
     
     try:
         gdf = get_geodata(filter_clause_view)
