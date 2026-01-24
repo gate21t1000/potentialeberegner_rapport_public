@@ -551,7 +551,15 @@ def get_kombo_alternativer_fallback(bygning_id):
         return []
     
     # Byg sensor lookup med aliaser for PIR/Bevægelsessensor
-    sensor_dict = {row['sensor_type']: row for _, row in sensor_df.iterrows()}
+    # Konverter til simple dicts for at undgå pandas Series problemer
+    sensor_dict = {}
+    for _, row in sensor_df.iterrows():
+        sensor_dict[row['sensor_type']] = {
+            'sensor_type': row['sensor_type'],
+            'antal': int(row['antal']),
+            'pris_min': float(row['pris_min']),
+            'pris_max': float(row['pris_max'])
+        }
     
     # Alias: Bevægelsessensor og Tilstedeværelsessensor er ens (PIR)
     pir_aliases = ['Bevægelsessensor', 'Tilstedeværelsessensor']
@@ -570,8 +578,15 @@ def get_kombo_alternativer_fallback(bygning_id):
     alternativer = []
     for _, kombo in kombo_df.iterrows():
         komponenter = kombo['komponenter']
-        if not komponenter:
+        # Håndter None, tom liste, eller pandas Series
+        if komponenter is None or (hasattr(komponenter, '__len__') and len(komponenter) == 0):
             continue
+        
+        # Konverter til liste hvis det er et array
+        if hasattr(komponenter, 'tolist'):
+            komponenter = komponenter.tolist()
+        elif not isinstance(komponenter, list):
+            komponenter = list(komponenter)
         
         # Tjek om alle komponenter findes (med alias-support)
         matched_komponenter = []
@@ -579,18 +594,21 @@ def get_kombo_alternativer_fallback(bygning_id):
         for k in komponenter:
             if k in sensor_dict:
                 matched_komponenter.append(k)
-            elif k in pir_aliases and pir_sensor:
+            elif k in pir_aliases and pir_sensor is not None:
                 # Brug alias
                 matched_komponenter.append(k)
             else:
                 all_found = False
                 break
         
-        if not all_found:
+        if not all_found or len(matched_komponenter) == 0:
             continue
         
         # Beregn antal kombos = min antal af komponenter
-        antal = min(int(sensor_dict[k]['antal']) for k in matched_komponenter)
+        try:
+            antal = min(int(sensor_dict[k]['antal']) for k in matched_komponenter)
+        except (ValueError, KeyError):
+            continue
         if antal <= 0:
             continue
         
