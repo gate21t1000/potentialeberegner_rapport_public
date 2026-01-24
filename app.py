@@ -526,17 +526,31 @@ def get_kombo_alternativer(bygning_id):
 @st.cache_data(ttl=300)
 def get_kombo_alternativer_fallback(bygning_id):
     """Fallback beregning af kombo-alternativer hvis DB-funktion ikke findes"""
-    # Hent sensorer for bygningen
+    # Hent antal sensorer per type i bygningen
     sensor_df = get_sensor_summary(bygning_id)
     if len(sensor_df) == 0:
         return []
     
-    # Hent aktive kombos
+    # Hent pris per stk fra iot_sensor_types
+    try:
+        pris_sql = f"""
+        SELECT sensor_type, pris_min_kr, pris_max_kr
+        FROM {SCHEMA}.iot_sensor_types
+        """
+        pris_df = query_df(pris_sql)
+        pris_lookup = {row['sensor_type']: {'pris_min': float(row['pris_min_kr']), 'pris_max': float(row['pris_max_kr'])} 
+                       for _, row in pris_df.iterrows()}
+    except Exception:
+        return []
+    
+    # Hent aktive kombos med deres komponent-priser
     try:
         kombo_sql = f"""
         SELECT 
             k.id, k.kombo_navn, k.pris_min_kr, k.pris_max_kr,
-            ARRAY_AGG(ist.sensor_type ORDER BY ist.sensor_type) AS komponenter
+            ARRAY_AGG(ist.sensor_type ORDER BY ist.sensor_type) AS komponenter,
+            SUM(ist.pris_min_kr) AS enkelt_pris_min,
+            SUM(ist.pris_max_kr) AS enkelt_pris_max
         FROM {SCHEMA}.iot_sensor_kombos k
         JOIN {SCHEMA}.kombo_komponenter kk ON kk.kombo_id = k.id
         JOIN {SCHEMA}.iot_sensor_types ist ON ist.id = kk.sensor_type_id
@@ -545,58 +559,62 @@ def get_kombo_alternativer_fallback(bygning_id):
         """
         kombo_df = query_df(kombo_sql)
     except Exception:
-        return []  # Kombo-tabeller findes ikke endnu
+        return []
     
     if len(kombo_df) == 0:
         return []
     
-    # Byg sensor lookup med aliaser for PIR/Bevægelsessensor
-    # Konverter til simple dicts for at undgå pandas Series problemer
-    sensor_dict = {}
+    # Byg sensor antal lookup (kun antal, ikke pris)
+    sensor_antal = {}
     for _, row in sensor_df.iterrows():
-        sensor_dict[row['sensor_type']] = {
-            'sensor_type': row['sensor_type'],
-            'antal': int(row['antal']),
-            'pris_min': float(row['pris_min']),
-            'pris_max': float(row['pris_max'])
-        }
+        sensor_antal[row['sensor_type']] = int(row['antal'])
     
     # Alias: Bevægelsessensor og Tilstedeværelsessensor er ens (PIR)
     pir_aliases = ['Bevægelsessensor', 'Tilstedeværelsessensor']
-    pir_sensor = None
+    pir_antal = None
+    pir_name = None
     for alias in pir_aliases:
-        if alias in sensor_dict:
-            pir_sensor = sensor_dict[alias]
+        if alias in sensor_antal:
+            pir_antal = sensor_antal[alias]
+            pir_name = alias
             break
     
-    # Tilføj aliaser til sensor_dict
-    if pir_sensor:
+    # Tilføj aliaser
+    if pir_antal is not None:
         for alias in pir_aliases:
-            if alias not in sensor_dict:
-                sensor_dict[alias] = pir_sensor
+            if alias not in sensor_antal:
+                sensor_antal[alias] = pir_antal
     
     alternativer = []
     for _, kombo in kombo_df.iterrows():
         komponenter = kombo['komponenter']
-        # Håndter None, tom liste, eller pandas Series
         if komponenter is None or (hasattr(komponenter, '__len__') and len(komponenter) == 0):
             continue
         
-        # Konverter til liste hvis det er et array
         if hasattr(komponenter, 'tolist'):
             komponenter = komponenter.tolist()
         elif not isinstance(komponenter, list):
             komponenter = list(komponenter)
         
-        # Tjek om alle komponenter findes (med alias-support)
+        # Fjern duplikater (f.eks. både Bevægelsessensor og Tilstedeværelsessensor)
+        unique_komponenter = []
+        has_pir = False
+        for k in komponenter:
+            if k in pir_aliases:
+                if not has_pir:
+                    has_pir = True
+                    unique_komponenter.append(k)
+            else:
+                unique_komponenter.append(k)
+        
+        # Tjek om alle komponenter findes i bygningen
         matched_komponenter = []
         all_found = True
-        for k in komponenter:
-            if k in sensor_dict:
+        for k in unique_komponenter:
+            if k in sensor_antal:
                 matched_komponenter.append(k)
-            elif k in pir_aliases and pir_sensor is not None:
-                # Brug alias
-                matched_komponenter.append(k)
+            elif k in pir_aliases and pir_antal is not None:
+                matched_komponenter.append(pir_name)
             else:
                 all_found = False
                 break
@@ -604,39 +622,36 @@ def get_kombo_alternativer_fallback(bygning_id):
         if not all_found or len(matched_komponenter) == 0:
             continue
         
-        # Beregn antal kombos = min antal af komponenter
+        # Antal kombos = minimum antal af alle komponenter
         try:
-            antal = min(int(sensor_dict[k]['antal']) for k in matched_komponenter)
+            antal = min(sensor_antal.get(k, 0) for k in matched_komponenter)
         except (ValueError, KeyError):
             continue
         if antal <= 0:
             continue
         
-        # Beregn enkelt-priser
-        enkelt_pris_min = sum(float(sensor_dict[k]['pris_min']) for k in matched_komponenter)
-        enkelt_pris_max = sum(float(sensor_dict[k]['pris_max']) for k in matched_komponenter)
+        # Beregn enkelt-pris per stk (sum af komponenternes priser fra iot_sensor_types)
+        enkelt_pris_per_stk_min = sum(pris_lookup.get(k, {'pris_min': 0})['pris_min'] for k in matched_komponenter)
+        enkelt_pris_per_stk_max = sum(pris_lookup.get(k, {'pris_max': 0})['pris_max'] for k in matched_komponenter)
         
-        # Beregn kombo-priser
-        kombo_pris_min = float(kombo['pris_min_kr']) * antal
-        kombo_pris_max = float(kombo['pris_max_kr']) * antal
+        # Kombo-pris per stk
+        kombo_pris_per_stk_min = float(kombo['pris_min_kr'])
+        kombo_pris_per_stk_max = float(kombo['pris_max_kr'])
         
-        # Kun vis hvis der er besparelse
-        if enkelt_pris_min > kombo_pris_max:
-            # Find de faktiske sensornavne fra bygningen (ikke kombo-definitionens navne)
-            faktiske_sensorer = [sensor_dict[k]['sensor_type'] for k in matched_komponenter]
+        # Kun vis hvis der er besparelse (enkelt > kombo)
+        if enkelt_pris_per_stk_min > kombo_pris_per_stk_max:
             alternativer.append({
                 'kombo_navn': kombo['kombo_navn'],
-                'erstatter': faktiske_sensorer,
+                'erstatter': matched_komponenter,
                 'antal': antal,
-                'kombo_pris_min': kombo_pris_min,
-                'kombo_pris_max': kombo_pris_max,
-                'enkelt_pris_min': enkelt_pris_min,
-                'enkelt_pris_max': enkelt_pris_max,
-                'besparelse_min': enkelt_pris_min - kombo_pris_max,
-                'besparelse_max': enkelt_pris_max - kombo_pris_min
+                'kombo_pris_min': kombo_pris_per_stk_min * antal,
+                'kombo_pris_max': kombo_pris_per_stk_max * antal,
+                'enkelt_pris_min': enkelt_pris_per_stk_min * antal,
+                'enkelt_pris_max': enkelt_pris_per_stk_max * antal,
+                'besparelse_min': (enkelt_pris_per_stk_min - kombo_pris_per_stk_max) * antal,
+                'besparelse_max': (enkelt_pris_per_stk_max - kombo_pris_per_stk_min) * antal
             })
     
-    # Sorter efter besparelse
     alternativer.sort(key=lambda x: x['besparelse_max'], reverse=True)
     return alternativer
 
