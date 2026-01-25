@@ -150,14 +150,49 @@ def build_filter_clause(filter_type, filter_value, bygning_id=None, use_bygning_
 
 @st.cache_data(ttl=300)
 def get_filter_options():
-    """Hent unikke værdier til filter dropdowns"""
+    """Hent unikke kommuner med navn til filter dropdowns"""
+    # Kommune kode til navn mapping
+    kommune_navne = {
+        '0101': 'København', '0147': 'Frederiksberg', '0151': 'Ballerup', '0153': 'Brøndby',
+        '0155': 'Dragør', '0157': 'Gentofte', '0159': 'Gladsaxe', '0161': 'Glostrup',
+        '0163': 'Herlev', '0165': 'Albertslund', '0167': 'Hvidovre', '0169': 'Høje-Taastrup',
+        '0173': 'Lyngby-Taarbæk', '0175': 'Rødovre', '0183': 'Ishøj', '0185': 'Tårnby',
+        '0187': 'Vallensbæk', '0190': 'Furesø', '0201': 'Allerød', '0210': 'Fredensborg',
+        '0217': 'Helsingør', '0219': 'Hillerød', '0223': 'Hørsholm', '0230': 'Rudersdal',
+        '0240': 'Egedal', '0250': 'Frederikssund', '0253': 'Greve', '0259': 'Køge',
+        '0260': 'Halsnæs', '0265': 'Roskilde', '0269': 'Solrød', '0270': 'Gribskov',
+        '0306': 'Odsherred', '0316': 'Holbæk', '0320': 'Faxe', '0326': 'Kalundborg',
+        '0329': 'Ringsted', '0330': 'Slagelse', '0336': 'Stevns', '0340': 'Sorø',
+        '0350': 'Lejre', '0360': 'Lolland', '0370': 'Næstved', '0376': 'Guldborgsund',
+        '0390': 'Vordingborg', '0400': 'Bornholm', '0410': 'Middelfart', '0411': 'Christiansø',
+        '0420': 'Assens', '0430': 'Faaborg-Midtfyn', '0440': 'Kerteminde', '0450': 'Nyborg',
+        '0461': 'Odense', '0479': 'Svendborg', '0480': 'Nordfyns', '0482': 'Langeland',
+        '0492': 'Ærø', '0510': 'Haderslev', '0530': 'Billund', '0540': 'Sønderborg',
+        '0550': 'Tønder', '0561': 'Esbjerg', '0563': 'Fanø', '0573': 'Varde',
+        '0575': 'Vejen', '0580': 'Aabenraa', '0607': 'Fredericia', '0615': 'Horsens',
+        '0621': 'Kolding', '0630': 'Vejle', '0657': 'Herning', '0661': 'Holstebro',
+        '0665': 'Lemvig', '0671': 'Struer', '0706': 'Syddjurs', '0707': 'Norddjurs',
+        '0710': 'Favrskov', '0727': 'Odder', '0730': 'Randers', '0740': 'Silkeborg',
+        '0741': 'Samsø', '0746': 'Skanderborg', '0751': 'Aarhus', '0756': 'Ikast-Brande',
+        '0760': 'Ringkøbing-Skjern', '0766': 'Hedensted', '0773': 'Morsø', '0779': 'Skive',
+        '0787': 'Thisted', '0791': 'Viborg', '0810': 'Brønderslev', '0813': 'Frederikshavn',
+        '0820': 'Vesthimmerlands', '0825': 'Læsø', '0840': 'Rebild', '0846': 'Mariagerfjord',
+        '0849': 'Jammerbugt', '0851': 'Aalborg', '0860': 'Hjørring'
+    }
+    
     kommuner = query_df(f"""
         SELECT DISTINCT kommunekode 
         FROM {SCHEMA}.bbr_potentiale 
         WHERE kommunekode IS NOT NULL 
         ORDER BY kommunekode
     """)
-    return kommuner['kommunekode'].tolist()
+    
+    # Returner dict med kode som nøgle og navn som værdi
+    result = {}
+    for kode in kommuner['kommunekode'].tolist():
+        navn = kommune_navne.get(kode, f"Kommune {kode}")
+        result[kode] = f"{navn} ({kode})"
+    return result
 
 @st.cache_data(ttl=300)
 def get_adresse_options():
@@ -670,10 +705,22 @@ filter_type = st.sidebar.selectbox(
 )
 
 filter_value = None
+kommune_kode = None  # Til SQL queries
+selected_kommune = None  # Kommune navn til visning
+
 if filter_type == "Kommune":
     try:
-        kommuner = get_filter_options()
-        filter_value = st.sidebar.selectbox("Vælg kommune", [""] + kommuner)
+        kommuner_dict = get_filter_options()
+        kommune_options = [""] + list(kommuner_dict.values())
+        selected_kommune = st.sidebar.selectbox("Vælg kommune", kommune_options)
+        
+        # Find kommunekode fra valgt navn
+        if selected_kommune:
+            for kode, navn in kommuner_dict.items():
+                if navn == selected_kommune:
+                    kommune_kode = kode
+                    filter_value = kode  # Brug kode til SQL
+                    break
     except Exception as e:
         st.sidebar.error(f"Kunne ikke hente kommuner: {e}")
 elif filter_type == "Adresse":
@@ -706,6 +753,8 @@ filter_clause_view = build_filter_clause(filter_type, filter_value, bygning_id, 
 # Filter beskrivelse
 if filter_type == "Alle":
     filter_beskrivelse = "Alle bygninger"
+elif filter_type == "Kommune" and selected_kommune:
+    filter_beskrivelse = f"Kommune: {selected_kommune}"
 elif filter_value:
     filter_beskrivelse = f"{filter_type}: {filter_value}"
 else:
@@ -725,7 +774,7 @@ if detalje_mode:
     show_kort = st.sidebar.checkbox("Kort", value=True)
     show_top_bygninger = False  # Irrelevant for enkelt bygning
     show_use_cases = st.sidebar.checkbox("Use cases (detaljeret)", value=True)
-    show_faciliteter = st.sidebar.checkbox("Faciliteter", value=True)
+    show_faciliteter = False  # Irrelevant for enkelt bygning - data vises i Bygningsoversigt
     show_sensor_usecase_breakdown = st.sidebar.checkbox("Sensor/Use case breakdown", value=True)
 else:
     show_statistik = st.sidebar.checkbox("Overordnet statistik", value=True)
@@ -749,10 +798,24 @@ st.caption(f"Rapport genereret: {datetime.now().strftime('%d-%m-%Y %H:%M')} | Fi
 st.markdown("""
 Dette værktøj beregner investeringspotentialet for IoT-sensorer baseret på data fra BBR (Bygnings- og Boligregistret).
 
-**Hvad er en BBR-enhed?** En enhed er f.eks. en bolig i et parcelhus, en lejlighed eller et erhvervslejemål. 
-Enfamiliehuse har typisk én enhed, mens etageejendomme har én enhed per lejlighed. 
-Hver enhed har registreret areal, anvendelse og faciliteter (toiletter, badeværelser, køkkener).
+**Formålet** med potentialeberegneren er at give bud på mulige use cases og estimater på pris for relaterede IoT-sensorer, 
+som kan give indsigt i brug og drift af bygningen. Målet er reduktion af energiforbrug, CO₂-udledning, vandforbrug m.m.
+Brug menuen i venstre side til at vælge en kommune eller adresse og se data på use cases og investeringsbehov.
 """)
+
+# Ordforklaring
+with st.expander("📖 Ordforklaring", expanded=False):
+    st.markdown("""
+    **BBR-enhed:** En enhed er f.eks. en bolig i et parcelhus, en lejlighed eller et erhvervslejemål. 
+    Enfamiliehuse har typisk én enhed, mens etageejendomme har én enhed per lejlighed. 
+    Hver enhed har registreret areal, anvendelse og faciliteter (toiletter, badeværelser, køkkener).
+    
+    **Use case:** Et konkret anvendelsesscenarie for IoT-sensorer, f.eks. "Behovsstyret ventilation via CO₂-måling" 
+    eller "Lækageovervågning af vandrør".
+    
+    **Kombo-sensor:** En kombinationssensor der indeholder flere sensortyper i én enhed (f.eks. temperatur + luftfugtighed + CO₂). 
+    Disse er typisk billigere end at købe sensorerne enkeltvis.
+    """)
 
 if detalje_mode:
     st.success(f"🔍 **Detalje-visning** for bygning: `{str(bygning_id)[:8]}...`")
@@ -891,6 +954,13 @@ if detalje_mode and show_sensorer:
                     width="stretch",
                     height=450
                 )
+                
+                # Fodnoter om beregningsmetoder
+                st.caption("""
+                **Fodnoter:**  
+                ¹ *CO₂-måler:* Antal beregnet ud fra 1 sensor per 500 m² – skal justeres ud fra faktiske forhold på lokationen.  
+                ² *Bevægelsessensor:* Antal beregnet ud fra 1 sensor per 100 m² – skal justeres ud fra faktiske forhold på lokationen.
+                """)
             
             # Totaler
             col_t1, col_t2, col_t3 = st.columns(3)
@@ -908,57 +978,6 @@ if detalje_mode and show_sensorer:
             
             try:
                 kombos = get_kombo_alternativer(bygning_id)
-                
-                # DEBUG: Vis hvad vi får tilbage
-                with st.expander("🔧 Debug info", expanded=False):
-                    st.write(f"Bygning ID: {bygning_id}")
-                    st.write(f"Kombos type: {type(kombos)}")
-                    st.write(f"Kombos indhold: {kombos}")
-                    
-                    # Test direkte SQL
-                    try:
-                        debug_sql = f"""
-                        SELECT sensor_elem->>'type' AS sensor_type,
-                               SUM((sensor_elem->>'antal')::INTEGER) AS antal
-                        FROM {SCHEMA}.bbr_potentiale bp,
-                             jsonb_array_elements(bp.iot_sensorer) AS sensor_elem
-                        WHERE bp.bygning = '{bygning_id}'
-                        GROUP BY sensor_elem->>'type'
-                        """
-                        debug_df = query_df(debug_sql)
-                        st.write("Sensorer i bygningen:")
-                        st.dataframe(debug_df)
-                        
-                        # Tjek kombo-priser vs enkelt-priser
-                        pris_sql = f"""
-                        SELECT ist.sensor_type, ist.pris_min_kr, ist.pris_max_kr
-                        FROM {SCHEMA}.iot_sensor_types ist
-                        WHERE ist.sensor_type IN ('Temperaturføler', 'Luftfugtighedssensor', 'CO2-måler', 
-                                                   'Bevægelsessensor', 'Tilstedeværelsessensor', 'Støjsensor')
-                        ORDER BY ist.sensor_type
-                        """
-                        pris_df = query_df(pris_sql)
-                        st.write("Sensor priser (fra iot_sensor_types):")
-                        st.dataframe(pris_df)
-                        
-                        # Tjek kombos
-                        kombo_sql = f"""
-                        SELECT k.kombo_navn, k.pris_min_kr, k.pris_max_kr,
-                               STRING_AGG(ist.sensor_type, ' + ') AS komponenter,
-                               SUM(ist.pris_min_kr) AS sum_enkelt_min,
-                               SUM(ist.pris_max_kr) AS sum_enkelt_max
-                        FROM {SCHEMA}.iot_sensor_kombos k
-                        JOIN {SCHEMA}.kombo_komponenter kk ON kk.kombo_id = k.id
-                        JOIN {SCHEMA}.iot_sensor_types ist ON ist.id = kk.sensor_type_id
-                        WHERE k.aktiv = TRUE
-                        GROUP BY k.id, k.kombo_navn, k.pris_min_kr, k.pris_max_kr
-                        """
-                        kombo_debug_df = query_df(kombo_sql)
-                        st.write("Kombo definitioner:")
-                        st.dataframe(kombo_debug_df)
-                        
-                    except Exception as e:
-                        st.write(f"Debug SQL fejl: {e}")
                 
                 # Tjek for fejl
                 if isinstance(kombos, dict) and 'error' in kombos:
@@ -1008,7 +1027,11 @@ if detalje_mode and show_sensorer:
                     
                     # Total besparelse
                     total_besparelse = sum(k['besparelse_max'] for k in kombos)
-                    st.success(f"💰 **Samlet potentiel besparelse:** {total_besparelse:,.0f} kr (ved brug af alle kombos)")
+                    antal_kombos = len(kombos)
+                    st.success(f"""
+                    💰 **Samlet potentiel besparelse:** {total_besparelse:,.0f} kr  
+                    *Ved at erstatte separate sensorer med {antal_kombos} kombo-alternativer baseret på sensortyperne i Sensoroversigten ovenfor.*
+                    """)
                     
                     # Bedre forklaring af advarsel
                     with st.expander("⚠️ Vigtigt om besparelsesberegningen", expanded=False):
@@ -1140,11 +1163,31 @@ if detalje_mode and show_sensor_usecase_breakdown:
 # =============================================================================
 
 if not detalje_mode and show_statistik:
-    st.header("📈 Overordnet Statistik")
-    st.caption("Aggregerede nøgletal for alle bygninger i det valgte filter.")
+    # Markant header for kommune/alle
+    if filter_type == "Kommune" and filter_value:
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #2e7d32 0%, #4caf50 100%); 
+                    padding: 25px; border-radius: 12px; margin-bottom: 20px;">
+            <h1 style="color: white; margin: 0; font-size: 2em;">📈 Statistik for {selected_kommune or filter_value}</h1>
+            <p style="color: #c8e6c9; margin: 10px 0 0 0; font-size: 1.1em;">
+                Aggregerede nøgletal for alle bygninger i kommunen
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.header("📈 Overordnet Statistik")
+        st.caption("Aggregerede nøgletal for alle bygninger i det valgte filter.")
     
     try:
         statistik = get_statistik(filter_clause)
+        
+        # Hovedtal i fremhævet boks
+        st.markdown("""
+        <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; 
+                    border-left: 4px solid #2e7d32; margin-bottom: 15px;">
+            <p style="margin: 0; color: #1b5e20; font-weight: bold;">📊 Nøgletal for separate sensorer</p>
+        </div>
+        """, unsafe_allow_html=True)
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -1157,13 +1200,38 @@ if not detalje_mode and show_statistik:
         with col4:
             st.metric("Investering (max)", f"{statistik['total_investering_max'].iloc[0]:,.0f} kr")
         
-        col5, col6, col7 = st.columns(3)
+        col5, col6 = st.columns(2)
         with col5:
-            st.metric("Gns. enheder/bygning", f"{statistik['gns_enheder_per_bygning'].iloc[0]:.1f}")
-        with col6:
             st.metric("Investering (min)", f"{statistik['total_investering_min'].iloc[0]:,.0f} kr")
-        with col7:
-            st.metric("Gns. investering/bygning", f"{statistik['gns_investering_per_bygning'].iloc[0]:,.0f} kr")
+        with col6:
+            pass  # Tom kolonne for balance
+        
+        # Forklaring af tallene
+        st.info("""
+        **💡 Om tallene:** Ovenstående investering er baseret på **separate enkelt-sensorer** – én sensor per funktion. 
+        Tallene viser hvad det ville koste, hvis hver sensortype købes individuelt.
+        
+        **Lavere investering mulig:** Ved at bruge **kombo-sensorer** (kombinationssensorer) kan den samlede investering 
+        reduceres væsentligt. Vælg en specifik adresse i menuen for at se konkrete kombo-alternativer og besparelsesmuligheder.
+        """)
+        
+        # Info om kombo-sensorer
+        with st.expander("ℹ️ Hvad er en kombo-sensor?", expanded=False):
+            st.markdown("""
+            En **kombo-sensor** (kombinationssensor) er en IoT-enhed der indeholder flere sensortyper i samme fysiske enhed.
+            
+            **Eksempel:**
+            - 4 separate sensorer: Temperatur (300 kr) + Luftfugtighed (400 kr) + CO₂ (800 kr) + PIR (400 kr) = **1.900 kr**
+            - 1 kombo-sensor med alle 4 funktioner = **1.200-1.300 kr**
+            - **Besparelse: ca. 600-700 kr per enhed**
+            
+            Kombo-sensorer giver typisk:
+            - ✅ Lavere samlet investering
+            - ✅ Færre enheder at installere og vedligeholde
+            - ✅ Samme funktionalitet som enkelt-sensorer
+            
+            Vælg en specifik adresse for at se tilgængelige kombo-alternativer.
+            """)
             
     except Exception as e:
         st.error(f"Kunne ikke hente statistik: {e}")
