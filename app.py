@@ -1323,7 +1323,7 @@ if show_kort:
             m = folium.Map(
                 location=[center_lat, center_lon],
                 zoom_start=zoom,
-                tiles='CartoDB positron'
+                tiles='OpenStreetMap'
             )
             
             # Tilføj markers med forbedret popup
