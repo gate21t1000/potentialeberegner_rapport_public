@@ -36,7 +36,7 @@ st.set_page_config(
 def get_engine():
     """Opret database connection med credentials fra secrets"""
     db = st.secrets["database"]
-    connection_string = f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
+    connection_string = f"postgresql+psycopg2://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}"
     return create_engine(connection_string)
 
 def query_df(sql):
